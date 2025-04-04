@@ -18,28 +18,27 @@ JType = {"1101111": "jal"}
 
 HaltInst = "00000000000000000000000001100011"
 
-# Memory configuration
+# Memory configuration (data memory only)
 MemStart = 0x00010000
 MemSize = 32
-StackBase = 0x00000100
-StackSize = 32
 
 # Global variables
 r = {}
 Memory = []
-Stack = []
 
 def ResetSimulator():
     """Reset all registers and memory to initial state"""
-    global r, Memory, Stack
+    global r, Memory
+    # Initialize 32 registers as 32-bit zero strings.
     r = {f"x{i}": "0" * 32 for i in range(32)}
-    r["x2"] = f"{StackBase + StackSize*4 - 4:032b}"  # Initialize stack pointer
+    # x2 is the stack pointer; initialize to 380.
+    r["x2"] = f"{380:032b}"
+    # Data memory: 32 words (128 bytes)
     Memory = ["0" * 32 for _ in range(MemSize)]
-    Stack = ["0" * 32 for _ in range(StackSize)]
 
-def ConvertToBinary(n, bits=32, signed=False):
+def ConvertToBinary(n, bits=32, flag=False):
     """Convert number to binary string of specified length"""
-    if signed and n < 0:
+    if flag and n < 0:
         n = (1 << bits) + n
     return f"{n & ((1 << bits) - 1):0{bits}b}"
 
@@ -47,151 +46,177 @@ def BinaryToDecimal(bstr):
     """Convert binary string to signed decimal"""
     if bstr[0] == "0":
         return int(bstr, 2)
-    return int(bstr, 2) - (1 << len(bstr))
+    else:
+        return int(bstr, 2) - (1 << len(bstr))
 
-def CheckType(opcode):
+def CheckType(Opcode):
     """Determine instruction type from opcode"""
-    if opcode in RType: return "R"
-    if opcode in IType: return "I"
-    if opcode in SType: return "S"
-    if opcode in BType: return "B"
-    if opcode in JType: return "J"
+    if Opcode in RType:
+        return "R"
+    elif Opcode in IType:
+        return "I"
+    elif Opcode in SType:
+        return "S"
+    elif Opcode in BType:
+        return "B"
+    elif Opcode in JType:
+        return "J"
     return "invalid"
 
-def ExecuteInstruction(instr, pc):
-    """Execute a single instruction and return updated pc and halt status"""
-    if instr == HaltInst:
-        return True, pc
+def ExecuteInstruction(BinaryInst, PC):
+    """Execute a single instruction and return updated PC (and halt signal)"""
+    if len(BinaryInst) != 32:
+        raise ValueError("Instruction must be 32 bits long.")
 
-    funct7 = instr[0:7]
-    rs2 = int(instr[7:12], 2)
-    rs1 = int(instr[12:17], 2)
-    funct3 = instr[17:20]
-    rd = int(instr[20:25], 2)
-    opcode = instr[25:32]
-    instr_type = CheckType(opcode)
+    if BinaryInst == HaltInst:
+        return True, PC  # Halt signal
 
-    rs1_val = BinaryToDecimal(r[f"x{rs1}"])
-    if instr_type in ["R", "S", "B"]:
-        rs2_val = BinaryToDecimal(r[f"x{rs2}"])
+    # Extract instruction fields
+    Funct7 = BinaryInst[0:7]
+    rs2Bin = BinaryInst[7:12]
+    rs1Bin = BinaryInst[12:17]
+    funct3 = BinaryInst[17:20]
+    rdBin = BinaryInst[20:25]
+    Opcode = BinaryInst[25:32]
 
-    if instr_type == "R":
+    rd = int(rdBin, 2)
+    rs1 = int(rs1Bin, 2)
+    rs2 = int(rs2Bin, 2)
+    InstrType = CheckType(Opcode)
+
+    if InstrType == "R":
+        rs1Val = BinaryToDecimal(r[f"x{rs1}"])
+        rs2Val = BinaryToDecimal(r[f"x{rs2}"])
         if funct3 == "000":
-            res = rs1_val + rs2_val if funct7 == "0000000" else rs1_val - rs2_val
-        elif funct3 == "010": res = 1 if rs1_val < rs2_val else 0
-        elif funct3 == "101": res = rs1_val >> (rs2_val & 0x1F)
-        elif funct3 == "110": res = rs1_val | rs2_val
-        elif funct3 == "111": res = rs1_val & rs2_val
-        else: res = 0
-        r[f"x{rd}"] = ConvertToBinary(res)
-        pc += 4
-
-    elif instr_type == "I":
-        imm = BinaryToDecimal(instr[0:12])
-        if IType[opcode] == "addi":
-            r[f"x{rd}"] = ConvertToBinary(rs1_val + imm)
-            pc += 4
-        elif IType[opcode] == "jalr":
-            if rd != 0:
-                r[f"x{rd}"] = ConvertToBinary(pc + 4)
-            pc = (rs1_val + imm) & ~1
-        elif IType[opcode] == "lw":
-            addr = rs1_val + imm
-            if StackBase <= addr < StackBase + StackSize*4:
-                r[f"x{rd}"] = Stack[(addr - StackBase)//4]
-            elif MemStart <= addr < MemStart + MemSize*4:
-                r[f"x{rd}"] = Memory[(addr - MemStart)//4]
+            if Funct7 == "0000000":
+                x = rs1Val + rs2Val  # ADD
             else:
-                r[f"x{rd}"] = "0"*32
-            pc += 4
-
-    elif instr_type == "S":
-        imm = BinaryToDecimal(instr[0:7] + instr[20:25])
-        addr = rs1_val + imm
-        if StackBase <= addr < StackBase + StackSize*4:
-            Stack[(addr - StackBase)//4] = r[f"x{rs2}"]
-        elif MemStart <= addr < MemStart + MemSize*4:
-            Memory[(addr - MemStart)//4] = r[f"x{rs2}"]
-        pc += 4
-
-    elif instr_type == "B":
-        imm = BinaryToDecimal(instr[0] + instr[24] + instr[1:7] + instr[20:24] + "0")
-        if (funct3 == "000" and rs1_val == rs2_val) or \
-           (funct3 == "001" and rs1_val != rs2_val):
-            pc += imm
+                x = rs1Val - rs2Val  # SUB
+        elif funct3 == "010":
+            x = 1 if rs1Val < rs2Val else 0  # SLT
+        elif funct3 == "101":
+            x = rs1Val >> (rs2Val & 0x1F)  # SRL
+        elif funct3 == "111":
+            x = rs1Val & rs2Val  # AND
+        elif funct3 == "110":
+            x = rs1Val | rs2Val  # OR
         else:
-            pc += 4
+            x = 0
+        r[f"x{rd}"] = ConvertToBinary(x)
+        PC += 4
 
-    elif instr_type == "J":
-        imm = BinaryToDecimal(instr[0] + instr[12:20] + instr[11] + instr[1:11] + "0")
+    elif InstrType == "I":
+        immBin = BinaryInst[0:12]
+        immVal = BinaryToDecimal(immBin)
+        rs1Val = BinaryToDecimal(r[f"x{rs1}"])
+        o = IType[Opcode]
+        if o == "addi":
+            x = rs1Val + immVal
+            r[f"x{rd}"] = ConvertToBinary(x)
+            PC += 4
+        elif o == "jalr":
+            if rd != 0:
+                r[f"x{rd}"] = ConvertToBinary(PC + 4)
+            PC = (rs1Val + immVal) & ~1
+        elif o == "lw":
+            Address = rs1Val + immVal
+            index = (Address - MemStart) // 4
+            if 0 <= index < MemSize and Address % 4 == 0:
+                r[f"x{rd}"] = Memory[index]
+            else:
+                r[f"x{rd}"] = "0" * 32
+            PC += 4
+
+    elif InstrType == "S":
+        immBin = BinaryInst[0:7] + BinaryInst[20:25]
+        immVal = BinaryToDecimal(immBin)
+        rs1Val = BinaryToDecimal(r[f"x{rs1}"])
+        rs2Val = BinaryToDecimal(r[f"x{rs2}"])
+        if SType[Opcode] == "sw":
+            Address = rs1Val + immVal
+            index = (Address - MemStart) // 4
+            if 0 <= index < MemSize and Address % 4 == 0:
+                Memory[index] = r[f"x{rs2}"]
+        PC += 4
+
+    elif InstrType == "B":
+        immBits = BinaryInst[0] + BinaryInst[24] + BinaryInst[1:7] + BinaryInst[20:24] + "0"
+        immVal = BinaryToDecimal(immBits)
+        rs1Val = BinaryToDecimal(r[f"x{rs1}"])
+        rs2Val = BinaryToDecimal(r[f"x{rs2}"])
+        BranchOp = BTypeFunct3.get(funct3, None)
+        if BranchOp == "beq" and rs1Val == rs2Val:
+            PC += immVal
+        elif BranchOp == "bne" and rs1Val != rs2Val:
+            PC += immVal
+        else:
+            PC += 4
+
+    elif InstrType == "J":
+        immStr = BinaryInst[0] + BinaryInst[12:20] + BinaryInst[11] + BinaryInst[1:11] + "0"
+        immVal = BinaryToDecimal(immStr)
         if rd != 0:
-            r[f"x{rd}"] = ConvertToBinary(pc + 4)
-        pc += imm
+            r[f"x{rd}"] = ConvertToBinary(PC + 4)
+        PC += immVal
 
     else:
-        pc += 4
+        PC += 4  # Unknown instruction
 
-    return False, pc
+    return False, PC
 
-def GetRegisterDump(pc):
+def GetRegisterDump(PC):
     """Generate register dump string"""
-    dump = f"0b{ConvertToBinary(pc)}"
+    Dump = "0b" + ConvertToBinary(PC)
     for i in range(32):
-        dump += f" 0b{r[f'x{i}']}"
-    return dump
+        Dump += " " + "0b" + r[f"x{i}"]
+    return Dump
 
 def GetMemoryTrace():
-    """Generate memory trace string"""
+    """Generate memory trace string for data memory only"""
     trace = []
     for i in range(MemSize):
-        addr = MemStart + i*4
-        trace.append(f"0x{addr:08X}:0b{Memory[i]}")
+        Address = MemStart + i * 4
+        addrHex = f"0x{Address:08X}"
+        trace.append(addrHex + ":0b" + Memory[i])
     return trace
 
-def RunSimulation(input_file, output_file):
-    """Run simulation for a single input file"""
-    ResetSimulator()
-    
-    with open(input_file, "r") as f:
-        instructions = [line.strip() for line in f if line.strip()]
-
-    pc = 0
-    register_dumps = []
-    
-    while 0 <= pc//4 < len(instructions):
-        instr = instructions[pc//4]
-        halt, pc = ExecuteInstruction(instr, pc)
-        register_dumps.append(GetRegisterDump(pc))
-        if halt:
-            break
-
-    memory_trace = GetMemoryTrace()
-
-    with open(output_file, "w") as f:
-        f.write("\n".join(register_dumps) + "\n")
-        f.write("\n".join(memory_trace) + "\n")
-
 def AutomatedTesting():
-    """Run automated tests for all input files"""
-    base_path = r"C:\Users\bimal\OneDrive\Desktop\final_valuation_framework_mar30_2025_students_v5"
-    input_dir = os.path.join(base_path, "automatedTesting", "tests", "bin", "simple")
-    output_dir = os.path.join(base_path, "automatedTesting", "tests", "user_traces", "simple")
-    
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
-    
+    """Run automated tests from input files"""
+    # Directories (assumed to already exist on your system)
+    Input = os.path.join("automatedTesting", "tests", "bin", "simple")
+    Output = os.path.join("automatedTesting", "tests", "user_traces", "simple")
+
     for i in range(1, 11):
-        input_file = os.path.join(input_dir, f"simple_{i}.txt")
-        output_file = os.path.join(output_dir, f"simple_{i}.txt")
-        
-        if os.path.exists(input_file):
-            try:
-                RunSimulation(input_file, output_file)
-                print(f"Processed: {input_file} -> {output_file}")
-            except Exception as e:
-                print(f"Error processing {input_file}: {str(e)}")
-        else:
-            print(f"Input file not found: {input_file}")
+        input_file = os.path.join(Input, f"simple_{i}.txt")
+        output_file = os.path.join(Output, f"simple_{i}.txt")
+
+        # Skip if input file doesn't exist
+        if not os.path.exists(input_file):
+            continue
+
+        ResetSimulator()
+
+        # Read input instructions
+        with open(input_file, "r") as infile:
+            Instructions = [line.strip() for line in infile if line.strip()]
+
+        results = []
+        PC = 0
+        while 0 <= PC // 4 < len(Instructions):
+            instruction = Instructions[PC // 4]
+            Halt, PC = ExecuteInstruction(instruction, PC)
+            results.append(GetRegisterDump(PC))
+            if Halt:
+                break
+
+        memTrace = GetMemoryTrace()
+
+        # Write output without any extra blank line between sections
+        with open(output_file, "w") as outfile:
+            for result in results:
+                outfile.write(result + "\n")
+            for mem in memTrace:
+                outfile.write(mem + "\n")
 
 if __name__ == "__main__":
     AutomatedTesting()
